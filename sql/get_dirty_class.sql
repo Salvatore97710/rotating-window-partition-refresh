@@ -16,7 +16,7 @@ BEGIN
 
     /*
       No ORDER BY.
-      A dirty class can return zero rows.
+      A dirty class may return zero rows.
     */
     SELECT
         source_key,

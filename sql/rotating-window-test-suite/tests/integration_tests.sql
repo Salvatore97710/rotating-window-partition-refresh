@@ -77,6 +77,9 @@ BEGIN
     DELETE FROM dbo.class_memory
     WHERE process_id = @ProcessId;
 
+    DELETE FROM dbo.refresh_process_insert_threshold
+    WHERE process_id = @ProcessId;
+
     DELETE FROM dbo.refresh_process
     WHERE process_id = @ProcessId;
 END;
@@ -134,6 +137,10 @@ EXEC dbo.usp_register_refresh_process
     @TotalClasses = 3,
     @DefaultInsertWindowSize = 2;
 
+EXEC dbo.usp_set_insert_window_policy
+    @ProcessName = N'test_rotating_ci',
+    @Policy = N'1:1';
+
 IF NOT EXISTS
 (
     SELECT 1
@@ -145,6 +152,18 @@ IF NOT EXISTS
       AND last_successful_run_id IS NULL
 )
     THROW 57001, 'TEST 01 FAILED: unexpected process configuration.', 1;
+
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM dbo.refresh_process_insert_threshold AS t
+    INNER JOIN dbo.refresh_process AS p
+        ON p.process_id = t.process_id
+    WHERE p.process_name = N'test_rotating_ci'
+      AND t.max_insert_count = 1
+      AND t.insert_window_size = 1
+)
+    THROW 57050, 'TEST 01 FAILED: adaptive policy was not saved.', 1;
 
 PRINT 'PASS 01';
 
@@ -175,7 +194,7 @@ IF NOT EXISTS
     THROW 57002, 'TEST 02 FAILED: unexpected BOOTSTRAP header.', 1;
 
 IF (SELECT COUNT(*) FROM dbo.refresh_run_row WHERE run_id = @BootstrapRun) <> 6
-    THROW 57003, 'TEST 02 FAILED: bootstrap must materialize 6 rows.', 1;
+    THROW 57003, 'TEST 02 FAILED: Bootstrap must materialize 6 rows.', 1;
 
 IF EXISTS
 (
@@ -187,7 +206,7 @@ IF EXISTS
     THROW 57004, 'TEST 02 FAILED: invalid BOOTSTRAP change_type/class_id.', 1;
 
 IF (SELECT COUNT(*) FROM dbo.refresh_run_dirty_class WHERE run_id = @BootstrapRun) <> 3
-    THROW 57005, 'TEST 02 FAILED: bootstrap must make 3 classes dirty.', 1;
+    THROW 57005, 'TEST 02 FAILED: Bootstrap must make 3 classes dirty.', 1;
 
 /* With 6 rows / 3 classes, the distribution must be 2-2-2. */
 IF EXISTS
@@ -198,7 +217,7 @@ IF EXISTS
     GROUP BY class_id
     HAVING COUNT(*) <> 2
 )
-    THROW 57006, 'TEST 02 FAILED: bootstrap distribution is not balanced 2-2-2.', 1;
+    THROW 57006, 'TEST 02 FAILED: Bootstrap distribution is not balanced 2-2-2.', 1;
 
 EXEC dbo.usp_finalize_refresh_run
     @RunId = @BootstrapRun;
@@ -211,7 +230,7 @@ IF NOT EXISTS
       AND status = 'COMPLETED'
       AND completed_at IS NOT NULL
 )
-    THROW 57007, 'TEST 02 FAILED: bootstrap is not COMPLETED.', 1;
+    THROW 57007, 'TEST 02 FAILED: Bootstrap is not COMPLETED.', 1;
 
 IF
 (
@@ -230,14 +249,14 @@ IF NOT EXISTS
       AND next_window_start_class = 1
       AND last_successful_run_id = @BootstrapRun
 )
-    THROW 57009, 'TEST 02 FAILED: unexpected process state after bootstrap.', 1;
+    THROW 57009, 'TEST 02 FAILED: unexpected process state after Bootstrap.', 1;
 
 
 /* Successful FINALIZE must remove operational staging for this RunId. */
 IF EXISTS (SELECT 1 FROM dbo.refresh_run_row WHERE run_id = @BootstrapRun)
    OR EXISTS (SELECT 1 FROM dbo.refresh_run_delete WHERE run_id = @BootstrapRun)
    OR EXISTS (SELECT 1 FROM dbo.refresh_run_dirty_class WHERE run_id = @BootstrapRun)
-    THROW 57038, 'TEST 02 FAILED: BOOTSTRAP staging was not cleaned after finalize.', 1;
+    THROW 57038, 'TEST 02 FAILED: BOOTSTRAP staging was not cleaned after FINALIZE.', 1;
 
 PRINT 'PASS 02';
 
@@ -289,10 +308,10 @@ IF NOT EXISTS
       AND delete_count = 1
       AND status = 'PREPARED'
 )
-    THROW 57010, 'TEST 03 FAILED: unexpected incremental header.', 1;
+    THROW 57010, 'TEST 03 FAILED: unexpected Incremental header.', 1;
 
 IF (SELECT COUNT(*) FROM dbo.refresh_run_row WHERE run_id = @IncrementalRun) <> 10
-    THROW 57011, 'TEST 03 FAILED: incremental snapshot must contain 10 rows.', 1;
+    THROW 57011, 'TEST 03 FAILED: Incremental snapshot must contain 10 rows.', 1;
 
 IF EXISTS
 (
@@ -335,7 +354,7 @@ IF NOT EXISTS
 )
     THROW 57014, 'TEST 03 FAILED: D004 was not detected with its historical class.', 1;
 
-/* Every class required for INSERT/UPDATE/DELETE must be dirty. */
+/* Every class required by INSERT/UPDATE/DELETE must be dirty. */
 IF EXISTS
 (
     SELECT expected.class_id
@@ -362,7 +381,7 @@ IF EXISTS
 )
     THROW 57015, 'TEST 03 FAILED: an expected dirty class is missing.', 1;
 
-/* No dirty classes unrelated to INSERT/UPDATE/DELETE must exist. */
+/* There must be no dirty classes unrelated to INSERT/UPDATE/DELETE. */
 IF EXISTS
 (
     SELECT d.class_id
@@ -409,7 +428,7 @@ IF
     INNER JOIN dbo.refresh_process AS p ON p.process_id = m.process_id
     WHERE p.process_name = N'test_rotating_ci'
 ) <> 10
-    THROW 57018, 'TEST 03 FAILED: memory after incremental must contain 10 rows.', 1;
+    THROW 57018, 'TEST 03 FAILED: memory after Incremental must contain 10 rows.', 1;
 
 IF NOT EXISTS
 (
@@ -429,12 +448,12 @@ IF NOT EXISTS
     WHERE run_id = @IncrementalRun
       AND status = 'COMPLETED'
 )
-    THROW 57039, 'TEST 03 FAILED: incremental is not COMPLETED.', 1;
+    THROW 57039, 'TEST 03 FAILED: Incremental is not COMPLETED.', 1;
 
 IF EXISTS (SELECT 1 FROM dbo.refresh_run_row WHERE run_id = @IncrementalRun)
    OR EXISTS (SELECT 1 FROM dbo.refresh_run_delete WHERE run_id = @IncrementalRun)
    OR EXISTS (SELECT 1 FROM dbo.refresh_run_dirty_class WHERE run_id = @IncrementalRun)
-    THROW 57040, 'TEST 03 FAILED: incremental staging was not cleaned after finalize.', 1;
+    THROW 57040, 'TEST 03 FAILED: Incremental staging was not cleaned after FINALIZE.', 1;
 
 PRINT 'PASS 03';
 
@@ -442,7 +461,7 @@ PRINT 'PASS 03';
 /* ============================================================================
    TEST 04 - DELETE-ONLY
    Explicitly verifies the current policy:
-   DELETE -> historical class dirty.
+   DELETE -> historical class becomes dirty.
 ============================================================================ */
 PRINT 'TEST 04 - delete-only incremental';
 
@@ -485,7 +504,7 @@ IF NOT EXISTS
     WHERE run_id = @DeleteOnlyRun
       AND class_id = @DeletedClass
 )
-    THROW 57021, 'TEST 04 FAILED: the historical DELETE class must be dirty.', 1;
+    THROW 57021, 'TEST 04 FAILED: the DELETE historical class must be dirty.', 1;
 
 IF EXISTS
 (
@@ -512,7 +531,7 @@ IF NOT EXISTS
 IF EXISTS (SELECT 1 FROM dbo.refresh_run_row WHERE run_id = @DeleteOnlyRun)
    OR EXISTS (SELECT 1 FROM dbo.refresh_run_delete WHERE run_id = @DeleteOnlyRun)
    OR EXISTS (SELECT 1 FROM dbo.refresh_run_dirty_class WHERE run_id = @DeleteOnlyRun)
-    THROW 57041, 'TEST 04 FAILED: DELETE-only staging was not cleaned after finalize.', 1;
+    THROW 57041, 'TEST 04 FAILED: DELETE-only staging was not cleaned after FINALIZE.', 1;
 
 PRINT 'PASS 04';
 
@@ -557,16 +576,17 @@ IF NOT EXISTS
 IF EXISTS (SELECT 1 FROM dbo.refresh_run_row WHERE run_id = @NoChangeRun)
    OR EXISTS (SELECT 1 FROM dbo.refresh_run_delete WHERE run_id = @NoChangeRun)
    OR EXISTS (SELECT 1 FROM dbo.refresh_run_dirty_class WHERE run_id = @NoChangeRun)
-    THROW 57042, 'TEST 05 FAILED: zero-change staging was not cleaned after finalize.', 1;
+    THROW 57042, 'TEST 05 FAILED: zero-change staging was not cleaned after FINALIZE.', 1;
 
 PRINT 'PASS 05';
 
 
 /* ============================================================================
-   TEST 06 - ONE INSERT PER RUN, WINDOW SIZE = 1
-   From start=3 it must visit 3 -> 1 -> 2 and then return to 3.
+   TEST 06 - ONE INSERT PER RUN, ADAPTIVE WINDOW = 1
+   Policy 1:1 must automatically resolve the effective window to 1.
+   Starting from 3, it must visit 3 -> 1 -> 2 and then return to 3.
 ============================================================================ */
-PRINT 'TEST 06 - window_size=1 rotation';
+PRINT 'TEST 06 - adaptive window_size=1 rotation';
 
 DECLARE
     @R1 uniqueidentifier,
@@ -578,8 +598,19 @@ INSERT dbo.test_rotating_source VALUES
 
 EXEC dbo.usp_prepare_incremental_run
     @ProcessName = N'test_rotating_ci',
-    @InsertWindowSize = 1,
     @RunId = @R1 OUTPUT;
+
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM dbo.refresh_run
+    WHERE run_id = @R1
+      AND insert_count = 1
+      AND insert_window_size = 1
+      AND window_start_class = 3
+      AND candidate_next_window_start = 1
+)
+    THROW 57051, 'TEST 06 FAILED: policy 1:1 did not produce effective window 1.', 1;
 
 IF NOT EXISTS
 (
@@ -598,7 +629,6 @@ INSERT dbo.test_rotating_source VALUES
 
 EXEC dbo.usp_prepare_incremental_run
     @ProcessName = N'test_rotating_ci',
-    @InsertWindowSize = 1,
     @RunId = @R2 OUTPUT;
 
 IF NOT EXISTS
@@ -618,7 +648,6 @@ INSERT dbo.test_rotating_source VALUES
 
 EXEC dbo.usp_prepare_incremental_run
     @ProcessName = N'test_rotating_ci',
-    @InsertWindowSize = 1,
     @RunId = @R3 OUTPUT;
 
 IF NOT EXISTS
@@ -641,7 +670,7 @@ IF NOT EXISTS
       AND next_window_start_class = 3
       AND default_insert_window_size = 2
 )
-    THROW 57029, 'TEST 06 FAILED: 3->1->2->3 rotation or default window is incorrect.', 1;
+    THROW 57029, 'TEST 06 FAILED: rotation 3->1->2->3 or default window is incorrect.', 1;
 
 
 IF EXISTS
@@ -699,7 +728,7 @@ EXEC dbo.usp_prepare_full_run
     @RunId = @FullRun OUTPUT;
 
 IF (SELECT COUNT(*) FROM dbo.refresh_run_row WHERE run_id = @FullRun) <> @MemoryBeforeFull
-    THROW 57030, 'TEST 07 FAILED: FULL must include only already classified keys.', 1;
+    THROW 57030, 'TEST 07 FAILED: FULL must include only already-classified keys.', 1;
 
 IF EXISTS
 (
@@ -708,7 +737,7 @@ IF EXISTS
     WHERE run_id = @FullRun
       AND source_key = N'FULL-NEW'
 )
-    THROW 57031, 'TEST 07 FAILED: FULL-NEW must not enter FULL.', 1;
+    THROW 57031, 'TEST 07 FAILED: FULL-NEW must not enter the FULL run.', 1;
 
 IF EXISTS
 (
@@ -747,7 +776,7 @@ IF NOT EXISTS
 IF EXISTS (SELECT 1 FROM dbo.refresh_run_row WHERE run_id = @FullRun)
    OR EXISTS (SELECT 1 FROM dbo.refresh_run_delete WHERE run_id = @FullRun)
    OR EXISTS (SELECT 1 FROM dbo.refresh_run_dirty_class WHERE run_id = @FullRun)
-    THROW 57044, 'TEST 07 FAILED: FULL staging was not cleaned after finalize.', 1;
+    THROW 57044, 'TEST 07 FAILED: FULL staging was not cleaned after FINALIZE.', 1;
 
 PRINT 'PASS 07';
 
@@ -798,7 +827,7 @@ IF EXISTS
     FROM #DirtyClassResult
     WHERE class_id <> @ApiClass
 )
-    THROW 57037, 'TEST 08 FAILED: usp_get_dirty_class returned another class.', 1;
+    THROW 57037, 'TEST 08 FAILED: usp_get_dirty_class returned a different class.', 1;
 
 DROP TABLE #DirtyClassResult;
 
@@ -808,7 +837,7 @@ EXEC dbo.usp_finalize_refresh_run @RunId = @ApiRun;
 IF EXISTS (SELECT 1 FROM dbo.refresh_run_row WHERE run_id = @ApiRun)
    OR EXISTS (SELECT 1 FROM dbo.refresh_run_delete WHERE run_id = @ApiRun)
    OR EXISTS (SELECT 1 FROM dbo.refresh_run_dirty_class WHERE run_id = @ApiRun)
-    THROW 57045, 'TEST 08 FAILED: API-run staging was not cleaned after finalize.', 1;
+    THROW 57045, 'TEST 08 FAILED: API-run staging was not cleaned after FINALIZE.', 1;
 
 IF NOT EXISTS
 (
@@ -817,7 +846,7 @@ IF NOT EXISTS
     WHERE run_id = @ApiRun
       AND status = 'COMPLETED'
 )
-    THROW 57046, 'TEST 08 FAILED: historical refresh_run was not preserved as COMPLETED.', 1;
+    THROW 57046, 'TEST 08 FAILED: refresh_run history was not preserved as COMPLETED.', 1;
 
 PRINT 'PASS 08';
 

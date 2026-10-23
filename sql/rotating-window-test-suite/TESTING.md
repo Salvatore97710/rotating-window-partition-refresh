@@ -10,11 +10,12 @@ It validates the main invariants of the current implementation:
 
 ```text
 register
+adaptive insert-window policy setup
 bootstrap
-mixed incremental
+mixed incremental with default window fallback
 DELETE-only incremental
 zero-change incremental
-window_size = 1 rotation
+automatic window_size = 1 rotation from threshold policy
 FULL semantics
 usp_get_dirty_class
 post-FINALIZE operational staging cleanup
@@ -38,6 +39,15 @@ The script uses isolated objects and the process:
 ```text
 test_rotating_ci
 ```
+
+The process is configured with:
+
+```text
+default_insert_window_size = 2
+policy = 1:1
+```
+
+so a single INSERT automatically resolves to an effective window of `1`, while larger batches fall back to the default `2`.
 
 It is rerunnable: previous state for that process is cleaned at the start.
 
@@ -66,6 +76,9 @@ Full before Bootstrap
 second PREPARED run
 Bootstrap with populated memory
 invalid per-run window override
+malformed adaptive policy
+adaptive policy window not smaller than default
+failed policy replacement preserves the previous configuration
 change total_classes with populated memory
 request of a non-dirty class
 double FINALIZE
@@ -109,33 +122,40 @@ Run this file only in a development/test database.
 
 ---
 
-## 3. `benchmarks/benchmark_v2_fixed.sql`
+## 3. `benchmarks/benchmark.sql`
 
-Parameterized performance benchmark with separated workloads.
+Parameterized performance benchmark focused on the current fixed-vs-adaptive rotating-window behavior.
 
 Default configuration:
 
 ```text
-BaseRows              = 100,000
-TotalClasses          = 100
-WindowSize            = 10
+BaseRows                       = 100,000
+TotalClasses                   = 100
+WindowSize                     = 10
 
-A APPEND-ONLY
-InsertRows            = 5,000
+A MASSIVE APPEND-ONLY
+InsertRows                     = 5,000
+UpdateRows                     = 0
+DeleteRows                     = 0
 
 B APPEND-HEAVY
-InsertRows            = 5,000
-UpdateRows            = 100
-DeleteRows            = 10
+InsertRows                     = 5,000
+UpdateRows                     = 10
+DeleteRows                     = 10
 
-C HIGH-CHURN
-InsertRows            = 5,000
-UpdateRows            = 5,000
-DeleteRows            = 1,000
+C ADAPTIVE WINDOW
+Runs                           = 10
+DefaultBatchInsertRows         = 5,000
+ThresholdBatchInsertRows       = 500
+ThresholdMaxInsertRows         = 500
+ThresholdWindowSize            = 1
+```
 
-D ROTATING CYCLE
-Runs                  = 10
-InsertRowsPerRun      = 5,000
+Scenario C alternates large and small INSERT-only batches on the same process:
+
+```text
+5,000 INSERTs -> no threshold match -> effective window 10
+500 INSERTs   -> threshold 500:1    -> effective window 1
 ```
 
 It measures elapsed time separately for:
@@ -151,6 +171,8 @@ FULL prepare
 FULL finalize
 ```
 
+The Full comparison is used in scenarios A and B. Scenario C instead keeps one process alive for 10 consecutive Incremental runs so the benchmark can observe the adaptive window decision and pointer progression over time.
+
 With the current implementation, `FINALIZE` time includes:
 
 ```text
@@ -161,10 +183,6 @@ cleanup of refresh_run_delete
 cleanup of refresh_run_dirty_class
 marking refresh_run as COMPLETED
 ```
-
-Therefore timings produced after this lifecycle change should not be compared
-directly with old benchmark results obtained before staging cleanup was part of
-`FINALIZE`.
 
 It also reports:
 
@@ -177,16 +195,22 @@ min / max / average class size
 max-min class-size spread
 ```
 
-Suggested scales:
+For the adaptive scenario it additionally reports:
 
 ```text
-10k
-100k
-500k
-1M
+run number
+batch mode
+inserted rows
+window_start_class
+effective_window_size
+candidate_next_start
+prepare time
+finalize time
 ```
 
-Run each scale multiple times and report the median rather than a single observation.
+The benchmark contains assertions that verify the expected adaptive behavior, including the default/threshold effective-window sequence and pointer advancement by the effective window used by each run.
+
+Run each configuration multiple times and report the median rather than a single observation.
 
 For meaningful published results, record:
 
@@ -197,26 +221,11 @@ RAM
 storage
 dataset size
 total_classes
-insert_window_size
+default_insert_window_size
+adaptive threshold policy
 INSERT / UPDATE / DELETE volumes
 ```
 
 `SET STATISTICS TIME` and `SET STATISTICS IO` are included but commented out.
 
 ---
-
-## Not yet fully automated
-
-Some areas require a multi-session or external-consumer harness and should remain explicit future work:
-
-```text
-true concurrent PREPARE attempts from separate SQL sessions
-application-lock contention timing
-consumer failure after only some Power BI partitions were refreshed
-real Power BI / Fabric timeout and retry behavior
-network/API failures
-long-running transaction interruption / server restart
-performance under concurrent workload
-```
-
-These are different from algorithmic correctness and should be tested before claiming production readiness.

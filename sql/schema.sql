@@ -40,6 +40,33 @@ BEGIN
 END;
 GO
 
+IF OBJECT_ID(N'dbo.refresh_process_insert_threshold', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.refresh_process_insert_threshold
+    (
+        process_id          int NOT NULL,
+        max_insert_count    bigint NOT NULL,
+        insert_window_size  int NOT NULL,
+
+        CONSTRAINT PK_refresh_process_insert_threshold
+            PRIMARY KEY (process_id, max_insert_count),
+
+        CONSTRAINT UQ_refresh_process_insert_threshold_window
+            UNIQUE (process_id, insert_window_size),
+
+        CONSTRAINT FK_refresh_process_insert_threshold_process
+            FOREIGN KEY (process_id)
+            REFERENCES dbo.refresh_process(process_id),
+
+        CONSTRAINT CK_refresh_process_insert_threshold_count
+            CHECK (max_insert_count > 0),
+
+        CONSTRAINT CK_refresh_process_insert_threshold_window
+            CHECK (insert_window_size > 0)
+    );
+END;
+GO
+
 IF OBJECT_ID(N'dbo.class_memory', N'U') IS NULL
 BEGIN
     CREATE TABLE dbo.class_memory

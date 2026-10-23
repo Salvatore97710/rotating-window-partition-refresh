@@ -5,21 +5,24 @@
 
 PREREQUISITES
 
-Run first, in this order:
+Run these first, in order:
 
 1. schema.sql
 2. demo_source.sql
 3. register_process.sql
-4. prepare_bootstrap.sql
-5. prepare_incremental.sql
-6. prepare_full.sql
-7. get_dirty_class.sql
-8. finalize_run.sql
+4. set_insert_window_policy.sql
+5. prepare_bootstrap.sql
+6. prepare_incremental.sql
+7. prepare_full.sql
+8. get_dirty_class.sql
+9. finalize_run.sql
 
 This demo uses:
 
-    total_classes = 3
-    insert_window_size = 2
+    total_classes                 = 3
+    default_insert_window_size    = 2
+    adaptive policy               = INSERT <= 5 -> window 1
+                                   above 5    -> default 2
 
 IMPORTANT
 ---------
@@ -65,7 +68,7 @@ FROM dbo.refresh_run;
    - 3 total classes
    - rotating window of 2 classes
 
-   AFTER EXECUTION CHECK refresh_process.
+   AFTER EXECUTION, CHECK refresh_process.
 
    EXPECTED:
    total_classes              = 3
@@ -85,21 +88,45 @@ SELECT *
 FROM dbo.refresh_process
 WHERE process_name = N'demo_rotating';
 
+/*
+   Configures the adaptive policy for the process.
+
+   <= 5 INSERT -> effective window = 1
+   >  5 INSERT -> fall back to the default = 2
+
+   The call fully replaces any previous policy
+   for the same process_id.
+*/
+EXEC dbo.usp_set_insert_window_policy
+    @ProcessName = N'demo_rotating',
+    @Policy = N'5:1';
+
+SELECT
+    p.process_name,
+    p.default_insert_window_size,
+    t.max_insert_count,
+    t.insert_window_size
+FROM dbo.refresh_process AS p
+LEFT JOIN dbo.refresh_process_insert_threshold AS t
+    ON t.process_id = p.process_id
+WHERE p.process_name = N'demo_rotating'
+ORDER BY t.max_insert_count;
+
 GO
 
 /* ============================================================================
    STEP 2 - PREPARE BOOTSTRAP
 
-   Bootstrap assigns an initial class to all source records.
+   Bootstrap assigns an initial class to every source record.
 
    EXPECTED:
    - refresh_run_row       -> 6 rows
-   - change_type           -> BOOTSTRAP for all rows
+   - change_type           -> BOOTSTRAP for all
    - class_id              -> values between 1 and 3
    - dirty classes         -> 1, 2, 3
 
    WARNING:
-   The source_key -> class_id association is NOT deterministic.
+   The source_key -> class_id assignment is NOT deterministic.
 ============================================================================ */
 
 DECLARE @BootstrapRun uniqueidentifier;
@@ -147,8 +174,8 @@ GO
 
    The BOOTSTRAP run is currently PREPARED.
 
-   In a real system this must be called ONLY after successful
-   downstream loading.
+   In a real system this must be called ONLY after the downstream
+   load succeeds.
 
    In the demo we simulate that the consumer completed successfully.
 
@@ -212,11 +239,11 @@ GO
 /* ============================================================================
    STEP 4 - SIMULATE SOURCE CHANGES
 
-   We simulate what can happen between two runs:
+   Simulate what can happen between two runs:
 
-   - B002 is modified                     -> UPDATE
-   - D004 is deleted                      -> DELETE
-   - N001 ... N005 are added              -> 5 INSERTs
+   - B002 is updated                 -> UPDATE
+   - D004 is deleted                  -> DELETE
+   - N001 ... N005 are added        -> 5 INSERT
 
    BEFORE:
        6 rows
@@ -271,11 +298,12 @@ GO
 
    B002:
        change_type = UPDATE
-       keeps the historical class
+       keeps its historical class
 
    N001 ... N005:
        change_type = INSERT
-       are assigned ONLY to classes 1 and 2
+       insert_count = 5 matches threshold 5:1
+       they are assigned ONLY to class 1
 
    D004:
        does not appear in refresh_run_row
@@ -283,8 +311,10 @@ GO
 
    Rotating window:
 
-       current window = 1,2
-       candidate_next_window_start = 3
+       default window size = 2
+       effective window     = 1
+       current window       = class 1
+       candidate_next_window_start = 2
 ============================================================================ */
 
 DECLARE @IncrementalRun uniqueidentifier;
@@ -309,7 +339,7 @@ WHERE run_id = @IncrementalRun
 ORDER BY source_key;
 
 
-/* Classes actually to be updated */
+/* Classes that actually need to be refreshed */
 SELECT *
 FROM dbo.refresh_run_dirty_class
 WHERE run_id = @IncrementalRun;
@@ -324,7 +354,7 @@ GO
 /* ============================================================================
    STEP 6 - FINALIZE INCREMENTAL
 
-   The previous STEP left the run in PREPARED state.
+   The previous STEP left the run in PREPARED status.
 
    Simulates consumer success.
 
@@ -334,7 +364,7 @@ GO
    - D004 is no longer present in memory
    - N001 ... N005 are present
    - refresh_run.status                 = COMPLETED
-   - next_window_start_class            = 3
+   - next_window_start_class            = 2
    - refresh_run_row                    = 0 rows for this RunId
    - refresh_run_delete                 = 0 rows for this RunId
    - refresh_run_dirty_class            = 0 rows for this RunId
@@ -390,13 +420,13 @@ dirty_classes_after_finalize = 0
 
 GO
 /* ============================================================================
-   STEP 7 - FULL PREPARATION
+   STEP 7 - PREPARE FULL SOURCE STATE
 
-   We insert a completely new key.
+   Insert a completely new key.
 
    FULL-NEW does NOT exist in class_memory.
 
-   We also modify A001.
+   Also update A001.
 
    EXPECTED:
        source = 11 rows
@@ -437,13 +467,13 @@ GO
            INNER JOIN
        class_memory
 
-   Therefore FULL-NEW is ignored because it does not yet have a class.
+   Therefore FULL-NEW is ignored because it does not have a class yet.
 
    EXPECTED:
 
-       source                 = 11
+       source                = 11
        refresh_run_row       = 10
-       FULL-NEW in the run    = 0
+       FULL-NEW in run        = 0
        dirty classes         = 1,2,3
 
    All included rows:
@@ -475,13 +505,13 @@ GO
 /* ============================================================================
    STEP 9 - FINALIZE FULL
 
-   The previous STEP left the FULL run in PREPARED state.
+   The previous STEP left the FULL run in PREPARED status.
 
    EXPECTED AFTER FINALIZE:
    - refresh_run.status                 = COMPLETED
    - class_memory                       = 10 rows
    - FULL-NEW remains outside memory
-   - next_window_start_class            = 3
+   - next_window_start_class            = 2
    - refresh_run_row                    = 0 rows for this RunId
    - refresh_run_delete                 = 0 rows for this RunId
    - refresh_run_dirty_class            = 0 rows for this RunId

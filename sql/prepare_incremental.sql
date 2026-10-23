@@ -44,7 +44,7 @@ DECLARE
         FROM dbo.class_memory
         WHERE process_id = @ProcessId
     )
-        THROW 55201, 'Empty memory: run bootstrap first.', 1;
+        THROW 55201, 'Empty memory: run Bootstrap first.', 1;
 
     IF EXISTS
     (
@@ -55,9 +55,13 @@ DECLARE
     )
         THROW 55202, 'A PREPARED run already exists.', 1;
 
-    SET @WindowSize = COALESCE(@InsertWindowSize, @DefaultWindowSize);
-
-    IF @WindowSize <= 0 OR @WindowSize > @TotalClasses
+    /*
+      An explicit override still takes precedence over the adaptive policy.
+      If the override is NULL, the effective window will be resolved after
+      counting the INSERTs in the run.
+    */
+    IF @InsertWindowSize IS NOT NULL
+       AND (@InsertWindowSize <= 0 OR @InsertWindowSize > @TotalClasses)
         THROW 55203, 'Invalid insert_window_size.', 1;
 
     SET @RunId = NEWID();
@@ -124,6 +128,49 @@ EXEC @LockResult = sys.sp_getapplock
            AND m.source_key = s.source_key;
 
         /*
+          Before assigning new keys, count the INSERT batch.
+          Rows already present in class_memory have a populated class_id;
+          rows still NULL are new keys.
+        */
+        SELECT @InsertCount = COUNT_BIG(*)
+        FROM #snapshot
+        WHERE class_id IS NULL;
+
+        /*
+          Effective-window resolution.
+
+          Precedence:
+          1. explicit per-run @InsertWindowSize;
+          2. first threshold >= @InsertCount;
+          3. default_insert_window_size as fallback.
+
+          With zero INSERTs the policy is not needed and the default is retained
+          as the descriptive run value; the window will not advance.
+        */
+        IF @InsertWindowSize IS NOT NULL
+        BEGIN
+            SET @WindowSize = @InsertWindowSize;
+        END
+        ELSE IF @InsertCount = 0
+        BEGIN
+            SET @WindowSize = @DefaultWindowSize;
+        END
+        ELSE
+        BEGIN
+            SELECT TOP (1)
+                @WindowSize = t.insert_window_size
+            FROM dbo.refresh_process_insert_threshold AS t
+            WHERE t.process_id = @ProcessId
+              AND @InsertCount <= t.max_insert_count
+            ORDER BY t.max_insert_count ASC;
+
+            SET @WindowSize = COALESCE(@WindowSize, @DefaultWindowSize);
+        END;
+
+        IF @WindowSize <= 0 OR @WindowSize > @TotalClasses
+            THROW 55203, 'Invalid effective insert_window_size.', 1;
+
+        /*
           New keys:
           no ordering by PK or timestamp.
           ROW_NUMBER only generates a technical offset.
@@ -157,10 +204,6 @@ EXEC @LockResult = sys.sp_getapplock
         FROM #snapshot AS s
         INNER JOIN inserted AS i
             ON i.source_key = s.source_key;
-
-        SELECT @InsertCount = COUNT_BIG(*)
-        FROM #snapshot
-        WHERE change_type = 'INSERT';
 
         SELECT @UpdateCount = COUNT_BIG(*)
         FROM #snapshot
@@ -255,7 +298,7 @@ EXEC @LockResult = sys.sp_getapplock
           );
 
         /*
-          INSERT dirty classes:
+          Dirty classes INSERT:
           generated directly from the window.
         */
         SET @UsedInsertClasses =
@@ -291,7 +334,7 @@ EXEC @LockResult = sys.sp_getapplock
         END;
 
         /*
-          Dirty classes UPDATE.
+          UPDATE dirty classes.
         */
         INSERT dbo.refresh_run_dirty_class
         (
@@ -312,7 +355,7 @@ EXEC @LockResult = sys.sp_getapplock
           );
 
         /*
-          Dirty classes DELETE.
+          DELETE dirty classes.
         */
         INSERT dbo.refresh_run_dirty_class
         (

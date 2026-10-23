@@ -13,7 +13,7 @@ BEGIN
         @LockResource nvarchar(255);
 
     /*
-      First read required to identify the process
+      Initial read required to identify the process
       and build the application-lock resource.
     */
     SELECT
@@ -49,7 +49,7 @@ BEGIN
         /* ---------------------------------------------------------------
            Re-check after acquiring the lock.
 
-           This also protects the case of two concurrent FINALIZE operations
+           This also protects against two concurrent FINALIZE operations
            that both read PREPARED before acquiring the lock.
         ---------------------------------------------------------------- */
         IF NOT EXISTS
@@ -64,7 +64,7 @@ BEGIN
 
 
         /* ---------------------------------------------------------------
-           CANDIDATE MEMORY PROMOTION
+           PROMOTION OF CANDIDATE MEMORY
 
            Call ONLY after downstream success
            for all dirty classes.
@@ -115,12 +115,12 @@ BEGIN
         /* ---------------------------------------------------------------
            RUN STAGING CLEANUP
 
-           A questo punto:
-           - the consumer completed successfully;
-           - refresh_run_row has already been promoted to class_memory;
+           At this point:
+           - the consumer has completed successfully;
+           - refresh_run_row has already been promoted into class_memory;
            - dirty classes and deletes are no longer needed.
 
-           We keep dbo.refresh_run as lightweight history instead.
+           dbo.refresh_run is retained as lightweight history.
         ---------------------------------------------------------------- */
 
         DELETE FROM dbo.refresh_run_dirty_class
@@ -134,9 +134,9 @@ BEGIN
 
 
         /* ---------------------------------------------------------------
-           RUN CLOSURE
+           RUN COMPLETION
 
-           The run header remains available as historical audit data:
+           The header remains available as historical audit data:
            counts, run type, window, status, and timestamp.
         ---------------------------------------------------------------- */
         UPDATE dbo.refresh_run

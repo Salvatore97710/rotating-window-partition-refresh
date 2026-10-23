@@ -55,6 +55,10 @@ DELETE m
 FROM dbo.class_memory AS m
 INNER JOIN @ids AS x ON x.process_id = m.process_id;
 
+DELETE t
+FROM dbo.refresh_process_insert_threshold AS t
+INNER JOIN @ids AS x ON x.process_id = t.process_id;
+
 DELETE p
 FROM dbo.refresh_process AS p
 INNER JOIN @ids AS x ON x.process_id = p.process_id;
@@ -181,6 +185,76 @@ EXEC dbo.usp_register_refresh_process
     @TotalClasses = 3,
     @DefaultInsertWindowSize = 2;
 
+/* ============================================================================
+   BREAK POLICY A - malformed policy -> 55011
+============================================================================ */
+PRINT 'BREAK POLICY A - malformed adaptive policy';
+
+SET @Caught = 0;
+
+BEGIN TRY
+    EXEC dbo.usp_set_insert_window_policy
+        @ProcessName = N'test_break_ci',
+        @Policy = N'not-a-policy';
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 55011
+        SET @Caught = 1;
+    ELSE
+        THROW;
+END CATCH;
+
+IF @Caught = 0
+    THROW 57143, 'BREAK POLICY A FAILED: malformed policy was not rejected.', 1;
+
+PRINT 'PASS BREAK POLICY A';
+
+/* ============================================================================
+   BREAK POLICY B - policy window >= default -> 55013
+   and preservation of the previous configuration after an error.
+============================================================================ */
+PRINT 'BREAK POLICY B - invalid window / preserve old policy';
+
+EXEC dbo.usp_set_insert_window_policy
+    @ProcessName = N'test_break_ci',
+    @Policy = N'10:1';
+
+SET @Caught = 0;
+
+BEGIN TRY
+    EXEC dbo.usp_set_insert_window_policy
+        @ProcessName = N'test_break_ci',
+        @Policy = N'100:2';
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 55013
+        SET @Caught = 1;
+    ELSE
+        THROW;
+END CATCH;
+
+IF @Caught = 0
+    THROW 57144, 'BREAK POLICY B FAILED: window >= default was not rejected.', 1;
+
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM dbo.refresh_process_insert_threshold AS t
+    INNER JOIN dbo.refresh_process AS p
+        ON p.process_id = t.process_id
+    WHERE p.process_name = N'test_break_ci'
+      AND t.max_insert_count = 10
+      AND t.insert_window_size = 1
+)
+    THROW 57145, 'BREAK POLICY B FAILED: previous policy was not preserved.', 1;
+
+/* Restore behavior without a policy for subsequent break tests. */
+EXEC dbo.usp_set_insert_window_policy
+    @ProcessName = N'test_break_ci',
+    @Policy = NULL;
+
+PRINT 'PASS BREAK POLICY B';
+
 
 /* ============================================================================
    BREAK 04 - Incremental before Bootstrap -> 55201
@@ -202,7 +276,7 @@ BEGIN CATCH
 END CATCH;
 
 IF @Caught = 0
-    THROW 57104, 'BREAK 04 FAILED: incremental without memory was not rejected.', 1;
+    THROW 57104, 'BREAK 04 FAILED: Incremental without memory was not rejected.', 1;
 
 PRINT 'PASS BREAK 04';
 
@@ -227,7 +301,7 @@ BEGIN CATCH
 END CATCH;
 
 IF @Caught = 0
-    THROW 57105, 'BREAK 05 FAILED: full without memory was not rejected.', 1;
+    THROW 57105, 'BREAK 05 FAILED: Full without memory was not rejected.', 1;
 
 PRINT 'PASS BREAK 05';
 
@@ -267,7 +341,7 @@ IF NOT EXISTS
     WHERE run_id = @BootstrapRun
       AND status = 'PREPARED'
 )
-    THROW 57107, 'BREAK 06 FAILED: the original PREPARED run was altered.', 1;
+    THROW 57107, 'BREAK 06 FAILED: the original PREPARED run was modified.', 1;
 
 PRINT 'PASS BREAK 06';
 
@@ -294,7 +368,7 @@ BEGIN CATCH
 END CATCH;
 
 IF @Caught = 0
-    THROW 57108, 'BREAK 07 FAILED: bootstrap with populated memory was not rejected.', 1;
+    THROW 57108, 'BREAK 07 FAILED: Bootstrap with populated memory was not rejected.', 1;
 
 PRINT 'PASS BREAK 07';
 
@@ -484,7 +558,7 @@ BEGIN CATCH
 END CATCH;
 
 IF @Caught = 0
-    THROW 57113, 'BREAK 12 FAILED: new prepare was allowed with an existing PREPARED run.', 1;
+    THROW 57113, 'BREAK 12 FAILED: new PREPARE was allowed while a PREPARED run existed.', 1;
 
 IF
 (
@@ -502,7 +576,7 @@ IF NOT EXISTS
     WHERE process_name = N'test_break_ci'
       AND last_successful_run_id = @LastSuccessfulBefore
 )
-    THROW 57115, 'BREAK 12 FAILED: last_successful_run_id changed before finalize.', 1;
+    THROW 57115, 'BREAK 12 FAILED: last_successful_run_id changed before FINALIZE.', 1;
 
 /*
    A PREPARED run must still own the operational staging needed
@@ -514,7 +588,7 @@ IF NOT EXISTS
     FROM dbo.refresh_run_row
     WHERE run_id = @PreparedRun
 )
-    THROW 57123, 'BREAK 12 FAILED: refresh_run_row disappeared before finalize.', 1;
+    THROW 57123, 'BREAK 12 FAILED: refresh_run_row disappeared before FINALIZE.', 1;
 
 IF NOT EXISTS
 (
@@ -522,7 +596,7 @@ IF NOT EXISTS
     FROM dbo.refresh_run_dirty_class
     WHERE run_id = @PreparedRun
 )
-    THROW 57124, 'BREAK 12 FAILED: dirty classes disappeared before finalize.', 1;
+    THROW 57124, 'BREAK 12 FAILED: dirty classes disappeared before FINALIZE.', 1;
 
 /* Retry uses the same materialized run. */
 EXEC dbo.usp_finalize_refresh_run @RunId = @PreparedRun;
@@ -534,7 +608,7 @@ IF NOT EXISTS
     WHERE process_name = N'test_break_ci'
       AND last_successful_run_id = @PreparedRun
 )
-    THROW 57116, 'BREAK 12 FAILED: retry/finalize of the same run did not succeed.', 1;
+    THROW 57116, 'BREAK 12 FAILED: retry/finalize of the same run failed.', 1;
 
 /*
    Successful FINALIZE must remove all operational staging.
@@ -546,7 +620,7 @@ IF EXISTS
     FROM dbo.refresh_run_row
     WHERE run_id = @PreparedRun
 )
-    THROW 57125, 'BREAK 12 FAILED: refresh_run_row was not cleaned after finalize.', 1;
+    THROW 57125, 'BREAK 12 FAILED: refresh_run_row was not cleaned after FINALIZE.', 1;
 
 IF EXISTS
 (
@@ -554,7 +628,7 @@ IF EXISTS
     FROM dbo.refresh_run_delete
     WHERE run_id = @PreparedRun
 )
-    THROW 57126, 'BREAK 12 FAILED: refresh_run_delete was not cleaned after finalize.', 1;
+    THROW 57126, 'BREAK 12 FAILED: refresh_run_delete was not cleaned after FINALIZE.', 1;
 
 IF EXISTS
 (
@@ -562,7 +636,7 @@ IF EXISTS
     FROM dbo.refresh_run_dirty_class
     WHERE run_id = @PreparedRun
 )
-    THROW 57127, 'BREAK 12 FAILED: dirty classes were not cleaned after finalize.', 1;
+    THROW 57127, 'BREAK 12 FAILED: dirty classes were not cleaned after FINALIZE.', 1;
 
 IF NOT EXISTS
 (
@@ -571,7 +645,7 @@ IF NOT EXISTS
     WHERE run_id = @PreparedRun
       AND status = 'COMPLETED'
 )
-    THROW 57137, 'BREAK 12 FAILED: historical refresh_run was not preserved as COMPLETED.', 1;
+    THROW 57137, 'BREAK 12 FAILED: refresh_run history was not preserved as COMPLETED.', 1;
 
 PRINT 'PASS BREAK 12';
 
@@ -623,7 +697,7 @@ IF NOT EXISTS
       AND m.source_key = N'B002'
       AND m.last_timestamp = @PreparedTimestamp
 )
-    THROW 57117, 'BREAK 13 FAILED: finalize did not promote the materialized snapshot.', 1;
+    THROW 57117, 'BREAK 13 FAILED: FINALIZE did not promote the materialized snapshot.', 1;
 
 /* The promoted snapshot is no longer needed after successful FINALIZE. */
 IF EXISTS
@@ -632,7 +706,7 @@ IF EXISTS
     FROM dbo.refresh_run_row
     WHERE run_id = @SnapshotRun
 )
-    THROW 57128, 'BREAK 13 FAILED: materialized snapshot was not cleaned after finalize.', 1;
+    THROW 57128, 'BREAK 13 FAILED: materialized snapshot was not cleaned after FINALIZE.', 1;
 
 IF EXISTS
 (
@@ -640,7 +714,7 @@ IF EXISTS
     FROM dbo.refresh_run_dirty_class
     WHERE run_id = @SnapshotRun
 )
-    THROW 57129, 'BREAK 13 FAILED: dirty classes were not cleaned after finalize.', 1;
+    THROW 57129, 'BREAK 13 FAILED: dirty classes were not cleaned after FINALIZE.', 1;
 
 IF EXISTS
 (
@@ -648,7 +722,7 @@ IF EXISTS
     FROM dbo.refresh_run_delete
     WHERE run_id = @SnapshotRun
 )
-    THROW 57130, 'BREAK 13 FAILED: delete staging was not cleaned after finalize.', 1;
+    THROW 57130, 'BREAK 13 FAILED: delete staging was not cleaned after FINALIZE.', 1;
 
 /* The later source change must be visible to the NEXT incremental. */
 DECLARE @NextRun uniqueidentifier;
@@ -676,7 +750,7 @@ IF EXISTS
     FROM dbo.refresh_run_row
     WHERE run_id = @NextRun
 )
-    THROW 57138, 'BREAK 13 FAILED: next-run staging was not cleaned after finalize.', 1;
+    THROW 57138, 'BREAK 13 FAILED: next-run staging was not cleaned after FINALIZE.', 1;
 
 PRINT 'PASS BREAK 13';
 
@@ -904,7 +978,7 @@ IF NOT EXISTS
     WHERE run_id = @RollbackRun
       AND status = 'COMPLETED'
 )
-    THROW 57142, 'BREAK 14 FAILED: run is not COMPLETED after successful retry.', 1;
+    THROW 57142, 'BREAK 14 FAILED: run was not COMPLETED after successful retry.', 1;
 
 DROP TRIGGER dbo.trg_test_force_finalize_failure;
 
